@@ -4,18 +4,12 @@
 # See the NOTICE for more information.
 
 import logging
+import fschanges
 import os
-import time
-import re
-import os.path
 try:
     import json
 except ImportError:
     import couchapp.simplejson as json
-try:
-    import gamin
-except ImportError:
-    gamin = None
 
 from couchapp import clone_app
 from couchapp.errors import ResourceNotFound, AppError, BulkSaveError
@@ -44,13 +38,9 @@ def init(conf, path, *args, **opts):
     document(dest, True)
 
 def autopush(conf, path, *args, **opts):
-    if not gamin:
-        raise AppError("The gamin module is requred by the autopush command.")
-
     push(conf, path, *args, **opts)
 
-    # ignore things that have a '/.' in their path
-    ignore = re.compile(opts.get('ignore', '/\.'))
+    ignore = opts.get('ignore', '/\.')
 
     export = opts.get('export', False)
     if len(args) < 2:
@@ -66,41 +56,10 @@ def autopush(conf, path, *args, **opts):
     if doc_path is None:
         raise AppError("You aren't in a couchapp.")
 
-    logger.info('Watching "%s" for changes' % doc_path)
-
-    watched_events = {
-        gamin.GAMChanged: 'changed',
-        gamin.GAMCreated: 'created',
-        gamin.GAMDeleted: 'deleted',
-        gamin.GAMMoved: 'moved',
-        }
-
-    status = {'changed': False}
-
-    def callback(path, event, base_dir):
-        full_path = os.path.join(base_dir, path)
-        if event in watched_events and not ignore.search(full_path):
-            logger.info("File %s was %s." % (full_path, watched_events[event]))
-            status['changed'] = True
-
-    mon = gamin.WatchMonitor()
-    mon.watch_directory(doc_path, callback, doc_path)
-    for root, dirs, _files in os.walk(doc_path):
-        for sub_dir in dirs:
-            sub_path = os.path.join(root, sub_dir)
-            if not ignore.search(sub_path):
-                mon.watch_directory(sub_path, callback, doc_path)
-
-    try:
-        while True:
-            time.sleep(1)
-            if mon.event_pending():
-                mon.handle_events()
-                if status['changed']:
-                    push(conf, path, *args, **opts)
-                    status['changed'] = False
-    except KeyboardInterrupt:
-        print("Caught Keyboard Interrupt. Exiting.")
+    for changeset in fschanges.watch(doc_path, ignore):
+        for change in changeset:
+            logger.info('"%s" %s' % change)
+        push(conf, path, *args, **opts)
 
 def push(conf, path, *args, **opts):
     export = opts.get('export', False)
