@@ -55,32 +55,6 @@ def _gamin_watch(path, ignore):
 
 
 def _win32_watch(path, ignore):
-    import signal  # this module forces signals to the main thread
-    import threading
-    import Queue
-    import tempfile
-    q = Queue.Queue()
-    die = threading.Event()
-    watcher = threading.Thread(
-        target=_win32_watch_thread,
-        args=(q, die, path, ignore))
-    watcher.start()
-    try:
-        while True:
-            try:
-                changes = q.get(True, .5)
-            except Queue.Empty:
-                continue
-            yield changes
-    finally:
-        die.set()
-        trigger_file = tempfile.NamedTemporaryFile(dir=path)
-        logger.info('Waiting for file watcher thread to terminate.')
-        watcher.join()
-        trigger_file.close()
-
-
-def _win32_watch_thread(q, die, path, ignore):
     # based on http://timgolden.me.uk/python/win32_how_do_i/watch_directory_for_changes.html
     watched_events = {
         1: "created",
@@ -116,14 +90,12 @@ def _win32_watch_thread(q, die, path, ignore):
             )
         changes = []
         for action, filename in results:
-            if die.is_set():
-                return
             full_path = os.path.join(path, filename)
             if action in watched_events and not ignore.search(full_path):
                 event = watched_events.get(action)
                 changes.append((full_path, event))
         if len(changes):
-            q.put(changes)
+            yield changes
             changes = []
 
 
