@@ -17,26 +17,33 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+
 def _gamin_watch(path, ignore):
-    watched_events = {gamin.GAMChanged: 'changed', 
-                      gamin.GAMCreated: 'created', 
-                      gamin.GAMDeleted: 'deleted', 
+    watched_events = {gamin.GAMChanged: 'changed',
+                      gamin.GAMCreated: 'created',
+                      gamin.GAMDeleted: 'deleted',
                       gamin.GAMMoved: 'moved'}
 
-    status = {'changes': []}
+    status = {'changes': [], 'new_watch': []}
 
     def callback(path, event, base_dir):
         full_path = os.path.join(base_dir, path)
         if event in watched_events and not ignore.search(full_path):
+            if os.path.isdir(full_path):
+                watch_recursive(full_path, callback)
+            status['new_watch'].append(full_path)
             status['changes'].append((full_path, watched_events[event]))
 
     mon = gamin.WatchMonitor()
-    mon.watch_directory(path, callback, path)
-    for root, dirs, _files in os.walk(path):
-        for sub_dir in dirs:
-            sub_path = os.path.join(root, sub_dir)
-            if not ignore.search(sub_path):
-                mon.watch_directory(sub_path, callback, path)
+
+    def watch_recursive(path, callback):
+        mon.watch_directory(path, callback, path)
+        for root, dirs, _files in os.walk(path):
+            for sub_dir in dirs:
+                sub_path = os.path.join(root, sub_dir)
+                if not ignore.search(sub_path):
+                    mon.watch_directory(sub_path, callback, sub_path)
+    watch_recursive(path, callback)
 
     while True:
         time.sleep(.5)
@@ -48,18 +55,42 @@ def _gamin_watch(path, ignore):
 
 
 def _win32_watch(path, ignore):
+    import signal  # this module forces signals to the main thread
+    import threading
+    import Queue
+    import tempfile
+    q = Queue.Queue()
+    die = threading.Event()
+    watcher = threading.Thread(
+        target=_win32_watch_thread,
+        args=(q, die, path, ignore))
+    watcher.start()
+    try:
+        while True:
+            try:
+                changes = q.get(True, .5)
+            except Queue.Empty:
+                continue
+            yield changes
+    finally:
+        die.set()
+        trigger_file = tempfile.NamedTemporaryFile(dir=path)
+        logger.info('Waiting for file watcher thread to terminate.')
+        watcher.join()
+        trigger_file.close()
+
+
+def _win32_watch_thread(q, die, path, ignore):
     # based on http://timgolden.me.uk/python/win32_how_do_i/watch_directory_for_changes.html
     watched_events = {
-        1 : "created",
-        2 : "deleted",
-        3 : "updated",
-        4 : "renamed to",
-        5 : "renamed from"
+        1: "created",
+        2: "deleted",
+        3: "updated",
+        4: "renamed to",
+        5: "renamed from",
         }
     FILE_LIST_DIRECTORY = 0x0001
 
-    # TODO: make sense of this http://msdn.microsoft.com/en-us/library/aa365465%28VS.85%29.aspx
-    #       enough to make this call nonblocking/asynchronous
     hDir = win32file.CreateFile(
         path,
         FILE_LIST_DIRECTORY,
@@ -67,10 +98,10 @@ def _win32_watch(path, ignore):
         None,
         win32con.OPEN_EXISTING,
         win32con.FILE_FLAG_BACKUP_SEMANTICS,
-        None
+        None,
         )
     while True:
-        results = win32file.ReadDirectoryChangesW (
+        results = win32file.ReadDirectoryChangesW(
             hDir,
             1024,
             True,
@@ -81,16 +112,18 @@ def _win32_watch(path, ignore):
             win32con.FILE_NOTIFY_CHANGE_LAST_WRITE |
             win32con.FILE_NOTIFY_CHANGE_SECURITY,
             None,
-            None
+            None,
             )
         changes = []
-        for action, file in results:
-            full_path = os.path.join(path, file)
+        for action, filename in results:
+            if die.is_set():
+                return
+            full_path = os.path.join(path, filename)
             if action in watched_events and not ignore.search(full_path):
                 event = watched_events.get(action)
                 changes.append((full_path, event))
         if len(changes):
-            yield changes
+            q.put(changes)
             changes = []
 
 
